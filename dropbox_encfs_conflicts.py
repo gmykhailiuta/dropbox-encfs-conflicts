@@ -121,7 +121,7 @@ def main(argv):
         bTerminate = False
         for iCurConflict,sCurConflict in enumerate(aConflicts):
             try:
-                print '\n=> Conflict file %s/%s: "%s"' % (iCurConflict+1,iConflicts,sCurConflict)
+                print '\n=> Conflict %s/%s: "%s"' % (iCurConflict+1,iConflicts,sCurConflict)
                 # Extract conflict message from encrypted file name.
                 reConflictMsg = re.compile(sRegEx)
                 aItems = reConflictMsg.findall(sCurConflict)
@@ -151,7 +151,7 @@ def main(argv):
                             print("Trying to decode parent directory: "+procEncFSCtlStdOut+" "+procEncFSCtlStdErr)
                         continue
                     sOrgFile = os.path.join(sEncFSMount, sConflictFileDec)
-                    print 'Original file: "%s"' % (sOrgFile,)
+                    print 'Original: "%s"' % (sOrgFile,)
                     bOrgFileExists = os.path.isfile(sOrgFile)
                     if bOrgFileExists:
                         sOrgFileMine = sOrgFile + "." + str(uuid.uuid4());
