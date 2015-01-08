@@ -26,7 +26,8 @@ import subprocess
 import sys
 import uuid
 import signal
-
+from Queue import Queue
+from threading import Thread
 
 def print_help():
     print "Script for resolving synchronization conflicts of EncFS-encrypted files"
@@ -39,35 +40,140 @@ def print_help():
     sys.exit(2)
 
 
-def signal_handling(signum,frame):           
-    global bTerminate                         
-    bTerminate = True
+# def do_stuff(q):
+#   while True:
+#     print q.get()
+#     q.task_done()
+
+# q = Queue(maxsize=0)
+# num_threads = 4
+
+# for i in range(num_threads):
+#   worker = Thread(target=do_stuff, args=(q,))
+#   worker.setDaemon(True)
+#   worker.start()
+
+# for x in range(100):
+#   q.put(x)
+
+# q.join()
 
 
-def decode_path(sEncFsCmd, sEncFSPath, sFileEnc, sEncFsPwd):
-    procEncFSCtl = subprocess.Popen([sEncFsCmd, "decode", \
-                                     sEncFSPath, sFileEnc, \
-                                     "--extpass=" + sEncFsPwd], \
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    procEncFSCtlStdOut, procEncFSCtlStdErr = procEncFSCtl.communicate(input=sEncFsPwd + '\n')
-    return procEncFSCtlStdOut.rstrip("\n"), procEncFSCtlStdErr.rstrip("\n")
+class ConflictsResolver:
+
+    def __init__(self):
+        self.aConflicts = []
+        self.bVerbose = False
+        self.sEncFSPath = ''
+        self.sEncFSMount = ''
+        ## @todo: Add language detection for non-English Dropboxes
+        #sConflictMsgRegEx = ' \(In Konflikt stehende Kopie von.*'
+        self.sConflictMsgRegEx = ' \(.*conflicted copy.*'
+        self.sConflictFileRegEx = '*conflicted*'
+
+
+    def revealAll(self):
+        for sRoot, aDirNames, aFilenames in os.walk(self.sEncFSPath):
+            for sFilename in fnmatch.filter(aFilenames, self.sConflictFileRegEx):
+                self.aConflicts.append(os.path.join(sRoot, sFilename))
+        if len(r.aConflicts) == 0:
+            print 'No conflicts found in "%s"' % (self.sEncFSPath,)
+        else:
+            iConflicts = len(self.aConflicts)
+            for iCurConflict, sCurConflict in enumerate(aConflicts):
+                print '\n=> Conflict %s/%s: "%s"' % (iCurConflict+1,iConflicts,sCurConflict)
+                self.reveal_conflict(sCurConflict)
+
+    def decode_path(self, sPathEnc):
+        try:
+            procEncFSCtl = subprocess.Popen([self.sEncFsCmd, "decode", \
+                                             self.sEncFSPath, sPathEnc, \
+                                             "--extpass=" + self.sEncFsPwd], \
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            procEncFSCtlStdOut, procEncFSCtlStdErr = procEncFSCtl.communicate(input=self.sEncFsPwd + '\n')
+            sFilename = procEncFSCtlStdOut.rstrip("\n")
+            sStdErr = procEncFSCtlStdErr.rstrip("\n")
+            if procEncFSCtl.returncode != 0 or sStdErr.find("err") > -1 or len(sFilename) == 0:
+                raise Exception('Unable to extract decoded file name: "%s"' % (sStdErr,))
+            
+            return sFilename
+
+        except OSError, e:
+            print 'ERROR: %s' % (e,)
+        except Exception, e:
+            print 'ERROR: %s' % (e,)
+
+    def reveal(sConflict):
+        # Extract conflict message from encrypted file name.
+        reConflictMsg = re.compile(self.sConflictMsgRegEx)
+        aItems = reConflictMsg.findall(sConflict)
+        if len(aItems) != 1:
+            raise Exception("Unable to extract conflict message")
+        sConflictMsg = aItems[0]
+        # Cut off conflict message.
+        aItems = re.split(self.sConflictMsgRegEx, sConflict)
+        if len(aItems) != 2:
+            raise Exception("Unable to separate conflict message from file name")
+        # Cut off absolute path to get the relative one.
+        aItems = aItems[0].split(self.sEncFSPath)
+        if len(aItems) != 2:
+            raise Exception("Unable to retrieve relative file path")
+        sConflictFileEnc = aItems[1]
+        sConflictPath = os.path.dirname(sConflictFileEnc)
+        sConflictFileEnc.strip() 
+        # Decode the file using encfsctl.
+        try:
+            try:
+                sConflictFileDec = self.decode_path(sConflictFileEnc)
+            except Exception, e:
+                print 'ERROR: %s' % (e,)
+                while len(sConflictFileEnc) > 0 and len(procEncFSCtlStdOut) == 0:
+                    sConflictFileEnc = os.path.dirname(sConflictFileEnc)
+                    print("Trying to decode parent directory: "+sConflictFileDec)
+                    sConflictFileDec = self.decode_path(sConflictFileEnc)
+                continue
+            sOrgFile = os.path.join(self.sEncFSMount, sConflictFileDec)
+            print 'Original: "%s"' % (sOrgFile,)
+            bOrgFileExists = os.path.isfile(sOrgFile)
+            if bOrgFileExists:
+                sOrgFileMine = sOrgFile + "." + str(uuid.uuid4());
+                # Step 1: Rename the original file *directly* on the mount
+                # (to not lose its contents thru eventual IV chaining). Use
+                # a temporary name w/ an UUID.
+                if bVerbose:
+                    print 'mv "%s" -> "%s"' % (sOrgFile, sOrgFileMine)
+                os.rename(sOrgFile, sOrgFileMine)
+            # Append absolute path again.
+            sConflictFileEnc = os.path.join(self.sEncFSPath, sConflictFileEnc)
+            # Step 2: Rename the partly encoded conflict file directly
+            # on the encrypted directory to match its original file name
+            # before the conflict. This should re-enable reading its file
+            # contents again.
+            if self.bVerbose:
+                print 'mv "%s" -> "%s"' % (sConflict, sConflictFileEnc)
+            os.rename(sConflict, sConflictFileEnc)
+            # Step 3: Rename the same file again, this time in the mounted
+            # directory to reflect the conflicting state including the
+            # original message.
+            sOrgFileTheirs = sOrgFile + sConflictMsg
+            if self.bVerbose:
+                print 'mv "%s" -> "%s"' % (sOrgFile, sOrgFileTheirs)
+            os.rename(sOrgFile, sOrgFileTheirs)
+            if bOrgFileExists:
+                # Step 4: Rename back my file to its original file name on
+                # the mounted directory.
+                if bVerbose:
+                    print 'mv "%s" -> "%s"' % (sOrgFileMine, sOrgFile)
+                os.rename(sOrgFileMine, sOrgFile)
+        except OSError, e:
+            print 'ERROR: %s' % (e,)
+        except Exception, e:
+            print 'ERROR: %s' % (e,)
+
+    
 
 def main(argv):
-    global bTerminate
-
-    # Sensible defaults.
-    bVerbose = False
-
-    sSystem = platform.system()
-    if sSystem == "Linux":
-        sEncFsCmd  = 'encfsctl'
-    else:
-        print 'WARNING: Unknown system "%s"' % (sSystem,)
-        # Don't quit -- command can be overriden by "--encfs-cmd".
-
-    sEncFSPath = ''
-    sEncFSMount = ''
-
+    r = ConflictsResolver()
     aOptions, aRemainder = getopt.getopt(sys.argv[1:], 'h:d:m:p:v', ['encfs-enc-dir=',
                                                                    'encfs-cmd=',
                                                                    'encfs-mount-dir=',
@@ -77,124 +183,31 @@ def main(argv):
                                                                   ])
     for opt, arg in aOptions:
         if opt in ('-d', '--encfs-enc-dir'):
-            sEncFSPath = arg
+            r.sEncFSPath = arg
         elif opt in ('--encfs-cmd'):
-            sEncFsCmd = arg
+            r.sEncFsCmd = arg
         elif opt in ('-m', '--encfs-mount-dir'):
-            sEncFSMount = arg
+            r.sEncFSMount = arg
         elif opt in ('-p', '--encfs-password'):
-            sEncFsPwd = arg
+            r.sEncFsPwd = arg
         elif opt in ('-h', '-?', '--help'):
             print_help()
         elif opt in ('-v', '--verbose'):
-            bVerbose = True
+            r.bVerbose = True
         else:
             print 'Unknown option "%s"' % (opt,)
             print_help
 
-    if sEncFSPath == "":
+    if r.sEncFSPath == "":
         print "ERROR: Missing EncFS encrypted directory"
         print_help()
-    elif sEncFSMount == "":
+    elif r.sEncFSMount == "":
         print "ERROR: Missing mounted EncFS directory"
         print_help()
 
     ## @todo Offer an "--encfs-password-file" option!
 
-    ## @todo: Add language detection for non-English Dropboxes
-    #sRegEx = ' \(In Konflikt stehende Kopie von.*'
-    sRegEx = ' \(.*conflicted copy.*'
-
-    ## @todo: Check existence of encrypted dir + mount.
-
-    print 'Path: %s' % (sEncFSPath,)
-
-    aConflicts = []
-    for sRoot, aDirNames, aFilenames in os.walk(sEncFSPath):
-      for sFilename in fnmatch.filter(aFilenames, '*conflicted*'):
-          aConflicts.append(os.path.join(sRoot, sFilename))
-
-    if len(aConflicts) == 0:
-        print 'No conflicts found in "%s"' % (sEncFSPath,)
-    else:
-        iConflicts = len(aConflicts)
-        bTerminate = False
-        for iCurConflict,sCurConflict in enumerate(aConflicts):
-            try:
-                print '\n=> Conflict %s/%s: "%s"' % (iCurConflict+1,iConflicts,sCurConflict)
-                # Extract conflict message from encrypted file name.
-                reConflictMsg = re.compile(sRegEx)
-                aItems = reConflictMsg.findall(sCurConflict)
-                if len(aItems) != 1:
-                    raise Exception("Unable to extract conflict message")
-                sConflictMsg = aItems[0]
-                # Cut off conflict message.
-                aItems = re.split(sRegEx, sCurConflict)
-                if len(aItems) != 2:
-                    raise Exception("Unable to separate conflict message from file name")
-                # Cut off absolute path to get the relative one.
-                aItems = aItems[0].split(sEncFSPath)
-                if len(aItems) != 2:
-                    raise Exception("Unable to retrieve relative file path")
-                sConflictFileEnc = aItems[1]
-                sConflictPath = os.path.dirname(sConflictFileEnc)
-                sConflictFileEnc.strip() 
-                # Decode the file using encfsctl.
-                try:
-                    procEncFSCtlStdOut, procEncFSCtlStdErr = decode_path(sEncFsCmd, sEncFSPath, sConflictFileEnc, sEncFsPwd)
-                    sConflictFileDec = procEncFSCtlStdOut.rstrip("\n")
-                    if procEncFSCtlStdOut.find("err") > -1 or len(sConflictFileDec) == 0:
-                        print('ERROR: Unable to extract decoded file name: "%s%s"' % (procEncFSCtlStdOut,procEncFSCtlStdErr))
-                        while len(sConflictFileEnc) > 0 and len(procEncFSCtlStdOut) == 0:
-                            sConflictFileEnc = os.path.dirname(sConflictFileEnc)
-                            procEncFSCtlStdOut, procEncFSCtlStdErr = decode_path(sEncFsCmd, sEncFSPath, sConflictFileEnc, sEncFsPwd)
-                            print("Trying to decode parent directory: "+procEncFSCtlStdOut+" "+procEncFSCtlStdErr)
-                        continue
-                    sOrgFile = os.path.join(sEncFSMount, sConflictFileDec)
-                    print 'Original: "%s"' % (sOrgFile,)
-                    bOrgFileExists = os.path.isfile(sOrgFile)
-                    if bOrgFileExists:
-                        sOrgFileMine = sOrgFile + "." + str(uuid.uuid4());
-                        # Step 1: Rename the original file *directly* on the mount
-                        # (to not lose its contents thru eventual IV chaining). Use
-                        # a temporary name w/ an UUID.
-                        if bVerbose:
-                            print 'mv "%s" -> "%s"' % (sOrgFile, sOrgFileMine)
-                        os.rename(sOrgFile, sOrgFileMine)
-                    # Append absolute path again.
-                    sConflictFileEnc = os.path.join(sEncFSPath, sConflictFileEnc)
-                    # Step 2: Rename the partly encoded conflict file directly
-                    # on the encrypted directory to match its original file name
-                    # before the conflict. This should re-enable reading its file
-                    # contents again.
-                    if bVerbose:
-                        print 'mv "%s" -> "%s"' % (sCurConflict, sConflictFileEnc)
-                    os.rename(sCurConflict, sConflictFileEnc)
-                    # Step 3: Rename the same file again, this time in the mounted
-                    # directory to reflect the conflicting state including the
-                    # original message.
-                    sOrgFileTheirs = sOrgFile + sConflictMsg
-                    if bVerbose:
-                        print 'mv "%s" -> "%s"' % (sOrgFile, sOrgFileTheirs)
-                    os.rename(sOrgFile, sOrgFileTheirs)
-                    if bOrgFileExists:
-                        # Step 4: Rename back my file to its original file name on
-                        # the mounted directory.
-                        if bVerbose:
-                            print 'mv "%s" -> "%s"' % (sOrgFileMine, sOrgFile)
-                        os.rename(sOrgFileMine, sOrgFile)
-                except OSError, e:
-                    print 'ERROR: %s' % (e,)
-                except Exception, e:
-                    print 'ERROR: %s' % (e,)
-
-                # Move file
-            except AttributeError, e:
-                print 'ERROR: %s' % (e,)
-
-            if bTerminate:
-                print("Interrupted")
-                sys.exit(0)
+    r.revealAll()
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT,signal_handling)
