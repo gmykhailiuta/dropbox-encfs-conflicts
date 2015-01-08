@@ -1,13 +1,14 @@
 #!/usr/bin/python
 
 # Copyright 2013 by x86dev.
+# Copyright 2015 by Gennadiy Mykhailiuta - Updates, OOP refactoring.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# This program is distributed in the hope that it will be useful,
+# This program is distributekhad in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
@@ -26,8 +27,8 @@ import subprocess
 import sys
 import uuid
 import signal
-from Queue import Queue
-from threading import Thread
+#from Queue import Queue
+#from threading import Thread
 
 def print_help():
     print "Script for resolving synchronization conflicts of EncFS-encrypted files"
@@ -64,6 +65,7 @@ class ConflictFilesRevealer:
     def __init__(self):
         self.aConflicts = []
         self.bVerbose = False
+        self.sEncFsCmd = 'encfsctl'
         self.sEncFSPath = ''
         self.sEncFSMount = ''
         ## @todo: Add language detection for non-English Dropboxes
@@ -76,15 +78,18 @@ class ConflictFilesRevealer:
         for sRoot, aDirNames, aFilenames in os.walk(self.sEncFSPath):
             for sFilename in fnmatch.filter(aFilenames, self.sConflictFileRegEx):
                 self.aConflicts.append(os.path.join(sRoot, sFilename))
-        if len(r.aConflicts) == 0:
+        if len(self.aConflicts) == 0:
             print 'No conflicts found in "%s"' % (self.sEncFSPath,)
         else:
             iConflicts = len(self.aConflicts)
-            for iCurConflict, sCurConflict in enumerate(aConflicts):
+            for iCurConflict, sCurConflict in enumerate(self.aConflicts):
                 print '\n=> Conflict %s/%s: "%s"' % (iCurConflict+1,iConflicts,sCurConflict)
-                self.reveal_conflict(sCurConflict)
+                self.reveal(sCurConflict)
 
     def decode_path(self, sPathEnc):
+        """
+        Returns "" if decoding failed and real filepath otherwise
+        """
         try:
             procEncFSCtl = subprocess.Popen([self.sEncFsCmd, "decode", \
                                              self.sEncFSPath, sPathEnc, \
@@ -100,10 +105,12 @@ class ConflictFilesRevealer:
 
         except OSError, e:
             print 'ERROR: %s' % (e,)
+            return ""
         except Exception, e:
             print 'ERROR: %s' % (e,)
+            return ""
 
-    def reveal(sConflict):
+    def reveal(self, sConflict):
         # Extract conflict message from encrypted file name.
         reConflictMsg = re.compile(self.sConflictMsgRegEx)
         aItems = reConflictMsg.findall(sConflict)
@@ -120,18 +127,27 @@ class ConflictFilesRevealer:
             raise Exception("Unable to retrieve relative file path")
         sConflictFileEnc = aItems[1]
         sConflictPath = os.path.dirname(sConflictFileEnc)
-        sConflictFileEnc.strip() 
+        sConflictFileEnc.strip()
         # Decode the file using encfsctl.
         try:
-            try:
+            sConflictFileDec = ""
+            bDecFailed = False
+            while len(sConflictFileEnc) > 0 and len(sConflictFileDec) == 0:
+                if self.bVerbose or bDecFailed:
+                    print('Trying to decode path: "%s"' % (sConflictFileEnc,))
                 sConflictFileDec = self.decode_path(sConflictFileEnc)
-            except Exception, e:
-                print 'ERROR: %s' % (e,)
-                while len(sConflictFileEnc) > 0 and len(procEncFSCtlStdOut) == 0:
+                if len(sConflictFileDec) > 0:
+                    # decoding was successful
+                    if self.bVerbose or bDecFailed:
+                        print('Path decoded: "%s"' % (sConflictFileDec,))
+                else:
+                    # should try to decode parent path
+                    print('Path decode failed: "%s"' % (sConflictFileEnc,))
+                    bDecFailed = True
                     sConflictFileEnc = os.path.dirname(sConflictFileEnc)
-                    print("Trying to decode parent directory: "+sConflictFileDec)
-                    sConflictFileDec = self.decode_path(sConflictFileEnc)
-                continue
+            if bDecFailed:
+                # path was not decoded. may be only parents found
+                return
             sOrgFile = os.path.join(self.sEncFSMount, sConflictFileDec)
             print 'Original: "%s"' % (sOrgFile,)
             bOrgFileExists = os.path.isfile(sOrgFile)
@@ -140,7 +156,7 @@ class ConflictFilesRevealer:
                 # Step 1: Rename the original file *directly* on the mount
                 # (to not lose its contents thru eventual IV chaining). Use
                 # a temporary name w/ an UUID.
-                if bVerbose:
+                if self.bVerbose:
                     print 'mv "%s" -> "%s"' % (sOrgFile, sOrgFileMine)
                 os.rename(sOrgFile, sOrgFileMine)
             # Append absolute path again.
@@ -162,7 +178,7 @@ class ConflictFilesRevealer:
             if bOrgFileExists:
                 # Step 4: Rename back my file to its original file name on
                 # the mounted directory.
-                if bVerbose:
+                if self.bVerbose:
                     print 'mv "%s" -> "%s"' % (sOrgFileMine, sOrgFile)
                 os.rename(sOrgFileMine, sOrgFile)
         except OSError, e:
@@ -172,7 +188,7 @@ class ConflictFilesRevealer:
 
     
 
-def main(argv):
+def main():
     r = ConflictFilesRevealer()
     aOptions, aRemainder = getopt.getopt(sys.argv[1:], 'h:d:m:p:v', ['encfs-enc-dir=',
                                                                    'encfs-cmd=',
