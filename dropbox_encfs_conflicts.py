@@ -59,7 +59,7 @@ def print_help():
 # q.join()
 
 
-class ConflictsResolver:
+class ConflictFilesRevealer:
 
     def __init__(self):
         self.aConflicts = []
@@ -173,7 +173,7 @@ class ConflictsResolver:
     
 
 def main(argv):
-    r = ConflictsResolver()
+    r = ConflictFilesRevealer()
     aOptions, aRemainder = getopt.getopt(sys.argv[1:], 'h:d:m:p:v', ['encfs-enc-dir=',
                                                                    'encfs-cmd=',
                                                                    'encfs-mount-dir=',
@@ -210,6 +210,5 @@ def main(argv):
     r.revealAll()
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT,signal_handling)
-    main(sys.argv[1:])
+    main()
 
